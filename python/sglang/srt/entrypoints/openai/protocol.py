@@ -553,6 +553,10 @@ class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: List[ChatCompletionMessageParam]
+    input_ids: Optional[Union[List[List[int]], List[int]]] = Field(
+        default=None,
+        description="Pre-tokenized prompt token IDs. When provided, chat template processing is skipped and these token IDs are used directly.",
+    )
     model: str = Field(
         default=DEFAULT_MODEL_NAME,
         description="Model name. Supports LoRA adapters via 'base-model:adapter-name' syntax.",

@@ -134,6 +134,27 @@ class ServingChatTestCase(unittest.TestCase):
             self.assertFalse(adapted.stream)
             self.assertEqual(processed, self.basic_req)
 
+    def test_convert_to_internal_request_with_input_ids_fast_path(self):
+        req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "ignored when input_ids is used"}],
+            input_ids=[11, 12, 13],
+            stream=False,
+            stop=["</s>"],
+        )
+
+        with patch.object(self.chat, "_process_messages") as proc_mock:
+            adapted, processed = self.chat._convert_to_internal_request(req)
+
+        proc_mock.assert_not_called()
+        self.assertEqual(adapted.input_ids, [11, 12, 13])
+        self.assertFalse(adapted.stream)
+        self.assertEqual(processed, req)
+
+    def test_validate_request_allows_empty_messages_with_input_ids(self):
+        req = ChatCompletionRequest(model="x", messages=[], input_ids=[1, 2, 3])
+        self.assertIsNone(self.chat._validate_request(req))
+
     def test_jinja_uses_openai_tool_schema_first(self):
         """Ensure Jinja chat templates receive OpenAI-shaped tools by default."""
         self.template_manager.chat_template_name = None

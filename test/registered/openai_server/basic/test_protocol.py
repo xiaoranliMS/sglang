@@ -124,6 +124,15 @@ class TestChatCompletionRequest(unittest.TestCase):
         self.assertFalse(request.stream)  # default
         self.assertEqual(request.tool_choice, "none")  # default when no tools
 
+    def test_chat_completion_request_with_input_ids(self):
+        """Test chat completion request with pre-tokenized input_ids."""
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "ignored when input_ids is used"}],
+            input_ids=[1, 2, 3, 4],
+        )
+        self.assertEqual(request.input_ids, [1, 2, 3, 4])
+
     def test_sampling_param_build(self):
         req = ChatCompletionRequest(
             model="x",

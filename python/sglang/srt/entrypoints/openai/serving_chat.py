@@ -192,7 +192,7 @@ class OpenAIServingChat(OpenAIServingBase):
 
     def _validate_request(self, request: ChatCompletionRequest) -> Optional[str]:
         """Validate that the input is valid."""
-        if not request.messages:
+        if not request.messages and request.input_ids is None:
             return "Messages cannot be empty."
 
         if (
@@ -259,24 +259,44 @@ class OpenAIServingChat(OpenAIServingBase):
         """Convert OpenAI chat completion request to internal format"""
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
 
-        # Process messages and apply chat template
-        processed_messages = self._process_messages(request, is_multimodal)
+        if request.input_ids is not None:
+            # Keep tool-use decoding constraints when clients pre-render prompts.
+            if request.tools and request.tool_choice != "none":
+                request.skip_special_tokens = False
 
-        # Build sampling parameters
-        sampling_params = request.to_sampling_params(
-            stop=processed_messages.stop,
-            model_generation_config=self.default_sampling_params,
-            tool_call_constraint=processed_messages.tool_call_constraint,
-        )
-
-        # Handle single vs multiple requests
-        if is_multimodal:
-            prompt_kwargs = {"text": processed_messages.prompt}
+            sampling_params = request.to_sampling_params(
+                stop=request.stop,
+                model_generation_config=self.default_sampling_params,
+                tool_call_constraint=self._build_tool_call_constraint(request),
+            )
+            prompt_kwargs = {"input_ids": request.input_ids}
+            image_data = None
+            video_data = None
+            audio_data = None
+            modalities = []
         else:
-            if isinstance(processed_messages.prompt_ids, str):
-                prompt_kwargs = {"text": processed_messages.prompt_ids}
+            # Process messages and apply chat template
+            processed_messages = self._process_messages(request, is_multimodal)
+
+            # Build sampling parameters
+            sampling_params = request.to_sampling_params(
+                stop=processed_messages.stop,
+                model_generation_config=self.default_sampling_params,
+                tool_call_constraint=processed_messages.tool_call_constraint,
+            )
+
+            # Handle single vs multiple requests
+            if is_multimodal:
+                prompt_kwargs = {"text": processed_messages.prompt}
             else:
-                prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
+                if isinstance(processed_messages.prompt_ids, str):
+                    prompt_kwargs = {"text": processed_messages.prompt_ids}
+                else:
+                    prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
+            image_data = processed_messages.image_data
+            video_data = processed_messages.video_data
+            audio_data = processed_messages.audio_data
+            modalities = processed_messages.modalities
 
         # Extract custom labels from raw request headers
         custom_labels = self.extract_custom_labels(raw_request)
@@ -293,16 +313,16 @@ class OpenAIServingChat(OpenAIServingBase):
         )
         adapted_request = GenerateReqInput(
             **prompt_kwargs,
-            image_data=processed_messages.image_data,
-            video_data=processed_messages.video_data,
-            audio_data=processed_messages.audio_data,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
             sampling_params=sampling_params,
             return_logprob=request.logprobs,
             logprob_start_len=-1,
             top_logprobs_num=request.top_logprobs or 0,
             stream=request.stream,
             return_text_in_logprobs=True,
-            modalities=processed_messages.modalities,
+            modalities=modalities,
             lora_path=lora_path,
             bootstrap_host=request.bootstrap_host,
             bootstrap_port=request.bootstrap_port,
@@ -325,6 +345,26 @@ class OpenAIServingChat(OpenAIServingBase):
 
         return adapted_request, request
 
+    def _build_tool_call_constraint(
+        self, request: ChatCompletionRequest
+    ) -> Optional[tuple[str, Union[dict, Any]]]:
+        """Build constrained-decoding hints for tool calling."""
+        tool_call_constraint = None
+        if request.tools and request.tool_choice != "none":
+            if self.tool_call_parser:
+                parser = FunctionCallParser(request.tools, self.tool_call_parser)
+                tool_call_constraint = parser.get_structure_constraint(
+                    request.tool_choice
+                )
+            if request.tool_choice == "required" or isinstance(
+                request.tool_choice, ToolChoice
+            ):
+                json_schema = get_json_schema_constraint(
+                    request.tools, request.tool_choice
+                )
+                tool_call_constraint = ("json_schema", json_schema)
+        return tool_call_constraint
+
     def _process_messages(
         self, request: ChatCompletionRequest, is_multimodal: bool
     ) -> MessageProcessingResult:
@@ -334,8 +374,6 @@ class OpenAIServingChat(OpenAIServingBase):
             request.skip_special_tokens = False
 
         self._patch_mistral_skip_special_tokens(request)
-
-        tool_call_constraint = None
 
         # Apply chat template and its stop strings
         tools = None
@@ -349,19 +387,8 @@ class OpenAIServingChat(OpenAIServingBase):
                 ]
             else:
                 tools = [item.model_dump() for item in request.tools]
-            if self.tool_call_parser:
-                parser = FunctionCallParser(request.tools, self.tool_call_parser)
-                tool_call_constraint = parser.get_structure_constraint(
-                    request.tool_choice
-                )
-            # Handle JSON schema constraint directly for required or named tool choice
-            if request.tool_choice == "required" or isinstance(
-                request.tool_choice, ToolChoice
-            ):
-                json_schema = get_json_schema_constraint(
-                    request.tools, request.tool_choice
-                )
-                tool_call_constraint = ("json_schema", json_schema)
+
+        tool_call_constraint = self._build_tool_call_constraint(request)
 
         # Use chat template
         if self.template_manager.chat_template_name is None:
